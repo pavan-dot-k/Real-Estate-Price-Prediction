@@ -1,0 +1,15 @@
+"Crime Overview Trend (Combined)"
+"Current date: 10/9/2025 8:02:15 PM (US Mountain Standard Time)"
+"Data source: AZ_summary, Summary Combined Return A & Part I Data"
+"Jurisdiction by Geography: Snowflake-Tayor PD"
+"Measures","Number of Actual Offenses",,,,,,,,,,,,,
+"Summary Month","All Summary Months","January","February","March","April","May","June","July","August","September","October","November","December",
+"Summary Date"
+"2018","275","24","14","29","27","21","27","42","25","28","13","16","9"
+"2019","237","23","15","20","22","33","23","12","16","22","20","21","10"
+"2020","227","16","9","25","14","16","19","28","26","13","26","21","14"
+"2021","195","19","15","16","6","5","10","19","15","20","15","29","26"
+"2022","281","33","29","19","13","24","27","18","18","27","19","23","31"
+"2023","274","21","18","17","15","24","28","36","23","25","25","19","23"
+"2025","49","28","21","","","","","","","","","",""
+"2024","257","22","24","17","18","20","24","23","25","10","25","21","28"
