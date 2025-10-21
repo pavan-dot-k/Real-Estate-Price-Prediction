@@ -13,7 +13,9 @@ print(f"\nDataset columns: {df.columns.tolist()}")
 print(f"\nFirst few rows:")
 print(df.head())
 if 'month/year' in df.columns:
+    # Extract both year and month from month/year column
     df['year'] = pd.to_datetime(df['month/year'], format='%m/%Y').dt.year
+    df['month'] = pd.to_datetime(df['month/year'], format='%m/%Y').dt.month
     df = df.drop('month/year', axis=1)
 
 if 'ZHVI' in df.columns:
@@ -21,7 +23,7 @@ if 'ZHVI' in df.columns:
 
 df.replace('N/A', np.nan, inplace=True)
 
-numeric_columns = ['year', 'zip', 'median_income', 'crime_rate_per_1000', 'business_count', 'avg_house_price']
+numeric_columns = ['year', 'month', 'zip', 'median_income', 'crime_rate_per_1000', 'business_count', 'avg_house_price']
 for col in numeric_columns:
     df[col] = pd.to_numeric(df[col], errors='coerce')
 
@@ -36,7 +38,7 @@ print(f"\nDataset shape after cleaning: {df.shape}")
 print(f"\nMissing values after cleaning:")
 print(df.isnull().sum())
 
-X = df[['year', 'zip', 'median_income', 'crime_rate_per_1000', 'business_count']]
+X = df[['year', 'month', 'zip', 'median_income', 'crime_rate_per_1000', 'business_count']]
 y = df['avg_house_price']
 
 print(f"\nFeatures shape: {X.shape}")
