@@ -1,6 +1,5 @@
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.linear_model import Lasso, Ridge, LinearRegression
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
@@ -23,14 +22,14 @@ if 'ZHVI' in df.columns:
 
 df.replace('N/A', np.nan, inplace=True)
 
-numeric_columns = ['year', 'month', 'zip', 'median_income', 'crime_rate_per_1000', 'business_count', 'avg_house_price']
+numeric_columns = ['year', 'month', 'zip', 'median_income', 'crime_rate_per_1000', 'avg_house_price']
 for col in numeric_columns:
     df[col] = pd.to_numeric(df[col], errors='coerce')
 
 print(f"\nMissing values before cleaning:")
 print(df.isnull().sum())
 df = df.dropna(subset=['avg_house_price'])
-feature_columns = ['median_income', 'crime_rate_per_1000', 'business_count']
+feature_columns = ['median_income', 'crime_rate_per_1000']
 for col in feature_columns:
     df[col] = df[col].fillna(df[col].median())
 
@@ -38,15 +37,35 @@ print(f"\nDataset shape after cleaning: {df.shape}")
 print(f"\nMissing values after cleaning:")
 print(df.isnull().sum())
 
-X = df[['year', 'month', 'zip', 'median_income', 'crime_rate_per_1000', 'business_count']]
+# Sort data by time for temporal splitting (CRITICAL for time series!)
+print("\nSorting data by time...")
+df = df.sort_values(['year', 'month', 'zip']).reset_index(drop=True)
+
+X = df[['year', 'month', 'zip', 'median_income', 'crime_rate_per_1000']]
 y = df['avg_house_price']
 
 print(f"\nFeatures shape: {X.shape}")
 print(f"Target shape: {y.shape}")
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
 
-print(f"\nTrain set size: {X_train.shape[0]}")
+# TEMPORAL SPLIT: Train on past data, test on future data (not random!)
+# This ensures we're testing the model's ability to predict the future
+split_index = int(len(df) * 0.7)  # 70% for training, 30% for testing
+
+X_train = X.iloc[:split_index]
+X_test = X.iloc[split_index:]
+y_train = y.iloc[:split_index]
+y_test = y.iloc[split_index:]
+
+print(f"\n" + "="*60)
+print("TEMPORAL SPLIT (Train on Past, Test on Future)")
+print("="*60)
+print(f"Train set size: {X_train.shape[0]}")
 print(f"Test set size: {X_test.shape[0]}")
+print(f"Training period: {df.iloc[:split_index]['year'].min()}/{df.iloc[:split_index]['month'].min():02d} "
+      f"to {df.iloc[:split_index]['year'].max()}/{df.iloc[:split_index]['month'].max():02d}")
+print(f"Testing period:  {df.iloc[split_index:]['year'].min()}/{df.iloc[split_index:]['month'].min():02d} "
+      f"to {df.iloc[split_index:]['year'].max()}/{df.iloc[split_index:]['month'].max():02d}")
+print("="*60)
 scaler = StandardScaler()
 X_train_scaled = scaler.fit_transform(X_train)
 X_test_scaled = scaler.transform(X_test)
