@@ -4,6 +4,7 @@ from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
 from sklearn.linear_model import Lasso, Ridge, LinearRegression
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 from sklearn.preprocessing import StandardScaler
+import joblib
 
 print("Loading dataset...")
 df = pd.read_csv('datasets/FInal Dataset/dataset_for_training.csv')
@@ -27,85 +28,60 @@ for col in numeric_columns:
 # Handle missing values
 df = df.dropna(subset=['avg_house_price'])
 
-# FIX #3: Use zip-specific median for imputation (not global median)
-# Fill missing values using the median specific to that zip code
-df['median_income'] = df.groupby('zip')['median_income'].transform(lambda x: x.fillna(x.median()))
-df['crime_rate_per_1000'] = df.groupby('zip')['crime_rate_per_1000'].transform(lambda x: x.fillna(x.median()))
-
-# Fill remaining (if a zip has NO data at all) with global median
-df['median_income'] = df['median_income'].fillna(df['median_income'].median())
-df['crime_rate_per_1000'] = df['crime_rate_per_1000'].fillna(df['crime_rate_per_1000'].median())
+# FIX 1: Zip-Specific Imputation
+# Fill missing income/crime with the median of THAT zip code first.
+feature_columns = ['median_income', 'crime_rate_per_1000']
+for col in feature_columns:
+    df[col] = df.groupby('zip')[col].transform(lambda x: x.fillna(x.median()))
+    # If a zip has NO data at all, fall back to global median
+    df[col] = df[col].fillna(df[col].median())
 
 # --- 2. CRITICAL: SORTING FOR TIME SERIES ---
-# You MUST sort by Zip first, then Time.
-# If you sort by Time first, shifting will leak data between different zip codes.
 print("\nSorting data by Zip and Time...")
 df = df.sort_values(['zip', 'year', 'month']).reset_index(drop=True)
 
-# --- 3. FEATURE ENGINEERING (The Forecasting Part) ---
+# --- 3. FEATURE ENGINEERING ---
 print("Creating Lag Features...")
 
 # A. Create Lags (History)
-# We use the PAST price to predict the FUTURE price.
-# We group by 'zip' so lags don't cross between different neighborhoods.
 lags = [1, 3, 6, 12] 
 for lag in lags:
     df[f'Price_Lag_{lag}'] = df.groupby('zip')['avg_house_price'].shift(lag)
     df[f'Income_Lag_{lag}'] = df.groupby('zip')['median_income'].shift(lag)
 
 # B. Create the Target (The Future)
-# We want to predict price 12 months into the future.
-# We shift NEGATIVELY to bring future values into the current row for training.
 FORECAST_HORIZON = 12
 df['Target_Price_Next_Year'] = df.groupby('zip')['avg_house_price'].shift(-FORECAST_HORIZON)
 
-# C. Drop NaN values created by shifting
-# (We lose the first 12 months of data for lags, and the last 12 months for targets)
+# C. Drop NaN values
 df_model = df.dropna()
-
 print(f"Data ready for modeling. Shape: {df_model.shape}")
 
 # --- 4. TEMPORAL SPLIT (CORRECTED) ---
-# FIX #1: Split by DATE, not by index
-# The previous split was splitting by ZIP CODES (not time) because we sorted by zip first!
+# FIX 2: Split by DATE, not by Index
+# This ensures we don't leak future data or split zip codes incorrectly.
 
-# Check available years in the dataset
-print(f"\nAvailable years: {sorted(df_model['year'].unique())}")
-print(f"Date range: {df_model['year'].min()}/{df_model['month'].min():02d} to "
-      f"{df_model['year'].max()}/{df_model['month'].max():02d}")
-
-# Determine a cutoff date (e.g., the last 20% of unique dates)
+# Get unique dates and find the 80% cutoff mark
 unique_dates = df_model[['year', 'month']].drop_duplicates().sort_values(['year', 'month'])
 split_idx = int(len(unique_dates) * 0.8)
 cutoff_row = unique_dates.iloc[split_idx]
-cutoff_year, cutoff_month = int(cutoff_row['year']), int(cutoff_row['month'])
+cutoff_year, cutoff_month = cutoff_row['year'], cutoff_row['month']
 
-print(f"\n⚠️  CRITICAL: Splitting by DATE (not zip index)")
-print(f"Training on data BEFORE: {cutoff_year}/{cutoff_month:02d}")
-print(f"Testing on data FROM: {cutoff_year}/{cutoff_month:02d} onwards")
+print(f"\nTemporal Split Cutoff: {cutoff_year}/{cutoff_month:02d}")
 
-# Split explicitly by date (all zips before cutoff = train, all zips after = test)
-train = df_model[(df_model['year'] < cutoff_year) | 
-                 ((df_model['year'] == cutoff_year) & (df_model['month'] < cutoff_month))].copy()
-test = df_model[(df_model['year'] > cutoff_year) | 
-                ((df_model['year'] == cutoff_year) & (df_model['month'] >= cutoff_month))].copy()
+# Create masks for Train (Before cutoff) and Test (After cutoff)
+train_mask = (df_model['year'] < cutoff_year) | ((df_model['year'] == cutoff_year) & (df_model['month'] < cutoff_month))
+test_mask = ~train_mask
 
-print(f"\nTemporal Split:")
-print(f"  Train: {train['year'].min()}/{train['month'].min():02d} to "
-      f"{train['year'].max()}/{train['month'].max():02d} ({len(train)} samples)")
-print(f"  Test:  {test['year'].min()}/{test['month'].min():02d} to "
-      f"{test['year'].max()}/{test['month'].max():02d} ({len(test)} samples)")
-print(f"  Train has {train['zip'].nunique()} zip codes")
-print(f"  Test has {test['zip'].nunique()} zip codes (should be same or similar)")
+train = df_model[train_mask]
+test = df_model[test_mask]
+
+print(f"  Train: {len(train)} samples")
+print(f"  Test:  {len(test)} samples")
 
 # Define Predictors (X)
-# NOTE: We do NOT use current 'avg_house_price' or 'median_income' as features
-# because we won't know them 12 months in advance accurately.
-# We use only Lags and Date info.
-
-# FIX #2: REMOVED 'zip' from predictors
-# Problem: Linear models treat zip as numeric (90210 > 10001 is meaningless)
-# Solution: The lag features already capture zip-specific history!
+# FIX 3: Removed 'zip' from predictors
+# We rely on the Lags to capture specific neighborhood price history.
 predictors = [
     'month', 
     'Price_Lag_1', 'Price_Lag_3', 'Price_Lag_6', 'Price_Lag_12',
@@ -116,8 +92,6 @@ X_train = train[predictors]
 y_train = train['Target_Price_Next_Year']
 X_test = test[predictors]
 y_test = test['Target_Price_Next_Year']
-
-print(f"\nTrain shape: {X_train.shape}, Test shape: {X_test.shape}")
 
 # --- 5. SCALE DATA FOR LINEAR MODELS ---
 print("\nScaling features for linear models...")
@@ -132,120 +106,65 @@ print("="*60)
 
 results = {}
 
-# Model 1: Gradient Boosting Regressor
+# Model 1: Gradient Boosting
 print("\n1. Training Gradient Boosting Regressor...")
-gb_model = GradientBoostingRegressor(
-    n_estimators=500,
-    learning_rate=0.05,
-    max_depth=5, 
-    random_state=42
-)
+gb_model = GradientBoostingRegressor(n_estimators=500, learning_rate=0.05, max_depth=5, random_state=42)
 gb_model.fit(X_train, y_train)
 gb_pred = gb_model.predict(X_test)
-
 gb_rmse = np.sqrt(mean_squared_error(y_test, gb_pred))
 gb_r2 = r2_score(y_test, gb_pred)
 gb_mae = mean_absolute_error(y_test, gb_pred)
 
-results['Gradient Boosting'] = {
-    'model': gb_model,
-    'predictions': gb_pred,
-    'RMSE': gb_rmse,
-    'MAE': gb_mae,
-    'R2': gb_r2,
-    'scaled': False
-}
+results['Gradient Boosting'] = {'model': gb_model, 'predictions': gb_pred, 'RMSE': gb_rmse, 'MAE': gb_mae, 'R2': gb_r2, 'scaled': False}
+print(f"   RMSE: {gb_rmse:,.2f} | R²: {gb_r2:.4f}")
 
-print(f"   ✓ RMSE: {gb_rmse:,.2f} | R²: {gb_r2:.4f} | MAE: {gb_mae:,.2f}")
-
-# Model 2: Random Forest Regressor
+# Model 2: Random Forest
 print("\n2. Training Random Forest Regressor...")
-rf_model = RandomForestRegressor(
-    n_estimators=300,
-    max_depth=10,
-    random_state=42,
-    n_jobs=-1
-)
+rf_model = RandomForestRegressor(n_estimators=300, max_depth=10, random_state=42, n_jobs=-1)
 rf_model.fit(X_train, y_train)
 rf_pred = rf_model.predict(X_test)
-
 rf_rmse = np.sqrt(mean_squared_error(y_test, rf_pred))
 rf_r2 = r2_score(y_test, rf_pred)
 rf_mae = mean_absolute_error(y_test, rf_pred)
 
-results['Random Forest'] = {
-    'model': rf_model,
-    'predictions': rf_pred,
-    'RMSE': rf_rmse,
-    'MAE': rf_mae,
-    'R2': rf_r2,
-    'scaled': False
-}
+results['Random Forest'] = {'model': rf_model, 'predictions': rf_pred, 'RMSE': rf_rmse, 'MAE': rf_mae, 'R2': rf_r2, 'scaled': False}
+print(f"   RMSE: {rf_rmse:,.2f} | R²: {rf_r2:.4f}")
 
-print(f"   ✓ RMSE: {rf_rmse:,.2f} | R²: {rf_r2:.4f} | MAE: {rf_mae:,.2f}")
-
-# Model 3: Lasso Regression
+# Model 3: Lasso
 print("\n3. Training Lasso Regression...")
 lasso_model = Lasso(alpha=1.0, random_state=42, max_iter=10000)
 lasso_model.fit(X_train_scaled, y_train)
 lasso_pred = lasso_model.predict(X_test_scaled)
-
 lasso_rmse = np.sqrt(mean_squared_error(y_test, lasso_pred))
 lasso_r2 = r2_score(y_test, lasso_pred)
 lasso_mae = mean_absolute_error(y_test, lasso_pred)
 
-results['Lasso'] = {
-    'model': lasso_model,
-    'predictions': lasso_pred,
-    'RMSE': lasso_rmse,
-    'MAE': lasso_mae,
-    'R2': lasso_r2,
-    'scaled': True
-}
+results['Lasso'] = {'model': lasso_model, 'predictions': lasso_pred, 'RMSE': lasso_rmse, 'MAE': lasso_mae, 'R2': lasso_r2, 'scaled': True}
+print(f"   RMSE: {lasso_rmse:,.2f} | R²: {lasso_r2:.4f}")
 
-print(f"   ✓ RMSE: {lasso_rmse:,.2f} | R²: {lasso_r2:.4f} | MAE: {lasso_mae:,.2f}")
-
-# Model 4: Ridge Regression
+# Model 4: Ridge
 print("\n4. Training Ridge Regression...")
 ridge_model = Ridge(alpha=1.0, random_state=42, max_iter=10000)
 ridge_model.fit(X_train_scaled, y_train)
 ridge_pred = ridge_model.predict(X_test_scaled)
-
 ridge_rmse = np.sqrt(mean_squared_error(y_test, ridge_pred))
 ridge_r2 = r2_score(y_test, ridge_pred)
 ridge_mae = mean_absolute_error(y_test, ridge_pred)
 
-results['Ridge'] = {
-    'model': ridge_model,
-    'predictions': ridge_pred,
-    'RMSE': ridge_rmse,
-    'MAE': ridge_mae,
-    'R2': ridge_r2,
-    'scaled': True
-}
-
-print(f"   ✓ RMSE: {ridge_rmse:,.2f} | R²: {ridge_r2:.4f} | MAE: {ridge_mae:,.2f}")
+results['Ridge'] = {'model': ridge_model, 'predictions': ridge_pred, 'RMSE': ridge_rmse, 'MAE': ridge_mae, 'R2': ridge_r2, 'scaled': True}
+print(f"   RMSE: {ridge_rmse:,.2f} | R²: {ridge_r2:.4f}")
 
 # Model 5: Linear Regression
 print("\n5. Training Linear Regression...")
 lr_model = LinearRegression()
 lr_model.fit(X_train_scaled, y_train)
 lr_pred = lr_model.predict(X_test_scaled)
-
 lr_rmse = np.sqrt(mean_squared_error(y_test, lr_pred))
 lr_r2 = r2_score(y_test, lr_pred)
 lr_mae = mean_absolute_error(y_test, lr_pred)
 
-results['Linear Regression'] = {
-    'model': lr_model,
-    'predictions': lr_pred,
-    'RMSE': lr_rmse,
-    'MAE': lr_mae,
-    'R2': lr_r2,
-    'scaled': True
-}
-
-print(f"   ✓ RMSE: {lr_rmse:,.2f} | R²: {lr_r2:.4f} | MAE: {lr_mae:,.2f}")
+results['Linear Regression'] = {'model': lr_model, 'predictions': lr_pred, 'RMSE': lr_rmse, 'MAE': lr_mae, 'R2': lr_r2, 'scaled': True}
+print(f"   RMSE: {lr_rmse:,.2f} | R²: {lr_r2:.4f}")
 
 # --- 7. MODEL COMPARISON ---
 print("\n" + "="*60)
@@ -270,11 +189,8 @@ best_model_data = results[best_model_name]
 best_model = best_model_data['model']
 
 print(f"\n🏆 BEST MODEL: {best_model_name}")
-print(f"   R² Score: {best_model_data['R2']:.4f}")
-print(f"   RMSE: ${best_model_data['RMSE']:,.2f}")
-print(f"   MAE: ${best_model_data['MAE']:,.2f}")
 
-# --- 8. FEATURE IMPORTANCE (for tree-based models) ---
+# --- 8. FEATURE IMPORTANCE ---
 if best_model_name in ['Gradient Boosting', 'Random Forest']:
     print(f"\n{best_model_name} Feature Importance:")
     feature_importance = pd.DataFrame({
@@ -284,8 +200,6 @@ if best_model_name in ['Gradient Boosting', 'Random Forest']:
     print(feature_importance.to_string(index=False))
 
 # --- 9. SAVE THE BEST MODEL ---
-import joblib
-
 print(f"\n{'='*60}")
 print("SAVING MODEL")
 print(f"{'='*60}")
@@ -294,16 +208,15 @@ print(f"{'='*60}")
 joblib.dump(best_model, 'gb_price_predictor.pkl')
 print(f"✅ Best model ({best_model_name}) saved as 'gb_price_predictor.pkl'")
 
-# Save the scaler if the best model requires it
+# Save the scaler if needed
 if best_model_data['scaled']:
     joblib.dump(scaler, 'scaler.pkl')
     print(f"✅ Scaler saved as 'scaler.pkl' (required for {best_model_name})")
 else:
-    # Save a None scaler for consistency
     joblib.dump(None, 'scaler.pkl')
     print(f"ℹ️  No scaler needed for {best_model_name}")
 
-# Save model metadata
+# Save metadata
 metadata = {
     'model_name': best_model_name,
     'requires_scaling': best_model_data['scaled'],
@@ -314,8 +227,3 @@ metadata = {
 }
 joblib.dump(metadata, 'model_metadata.pkl')
 print(f"✅ Model metadata saved as 'model_metadata.pkl'")
-
-print(f"\n{'='*60}")
-print(f"💡 To make predictions, run: python prediction.py")
-print(f"   This will allow you to predict prices for any zip code 12 months ahead.")
-print(f"{'='*60}")
